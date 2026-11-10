@@ -53,3 +53,17 @@ test('reads every window the usage endpoint lists, per-model ones included', () 
   const merged = mergeLimits([{ kind: 'five_hour', percent: 40 }, { kind: 'spend_limit', percent: 3 }], limits)
   expect(merged.map(l => `${l.kind}:${l.percent}`)).toEqual(['five_hour:41', 'seven_day:76', 'seven_day_fable:92.5', 'spend_limit:3'])
 })
+
+test('reads the model-scoped week from the limits list', () => {
+  const limits = parseAccount(
+    JSON.stringify({
+      five_hour: { utilization: 11 },
+      limits: [
+        { kind: 'session', percent: 11, resets_at: '2026-11-11T02:40:00Z', scope: null },
+        { kind: 'weekly_all', percent: 76, resets_at: '2026-11-14T01:00:00Z', scope: null },
+        { kind: 'weekly_scoped', percent: 0, resets_at: '2026-11-14T01:00:00Z', scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+      ],
+    }),
+  )
+  expect(limits.map(l => `${limitLabel(l.kind)}:${l.percent}`)).toEqual(['5h:11', 'Weekly:76', 'Fable:0'])
+})

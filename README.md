@@ -5,14 +5,13 @@ A Claude Code mod that keeps your limits and context in view.
 Above the prompt, the context window split by category:
 
 ```
-Context  ██████████████░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒▒   38%  76k/200k
-         ■ System prompt 3k  ■ System tools 14k  ■ MCP tools 2k  ■ Messages 55k
+Context  ██████████▒▒░░░░░░░░░░░░░░░░░░░░  12%  121k/1M   ■ System prompt 2k  ■ System tools 38k  ■ Skills 6k  ■ Messages 73k
 ```
 
-Under the prompt, the limits side by side:
+Under the prompt, the limits side by side after the footer hint:
 
 ```
-5h ████████░░░░ 41% ↻2h 14m  │  Weekly █████████░░░ 76% ↻3d 3h  │  Fable ███████████░ 92% ↻3d 3h
+(shift+tab to cycle)  ·  5h ████████░░░░ 41% ↻2h 14m  │  Weekly █████████░░░ 76% ↻3d 3h  │  Fable ███████████░ 92% ↻3d 3h
 ```
 
 - **5h**, **Weekly** and every per-model weekly window your account has (e.g. Fable), read from the account's usage endpoint; the engine sets the credential, the mod never sees it.

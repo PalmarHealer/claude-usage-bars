@@ -54,13 +54,33 @@ export const until = (iso: string | undefined, at: number) => {
   return `${minutes}m`
 }
 
+type Scope = { model?: { display_name?: string | null } | null; surface?: string | null } | null
+type EndpointLimit = { kind?: string; percent?: number; resets_at?: string; scope?: Scope }
+
+const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '_')
+
+/** `session` → `five_hour`, `weekly_all` → `seven_day`, a model-scoped week → `seven_day_<model>`. */
+const kindOf = (l: EndpointLimit) => {
+  if (l.kind === 'session') return 'five_hour'
+  if (l.kind === 'weekly_all') return 'seven_day'
+  const scope = l.scope?.model?.display_name ?? l.scope?.surface
+  if (l.kind === 'weekly_scoped' && scope) return `seven_day_${slug(scope)}`
+  return l.kind ?? 'unknown'
+}
+
 /**
- * The usage endpoint's windows: every `five_hour`/`seven_day*` entry that is
- * set and carries a utilization, so a per-model window (Fable, Opus) shows up
- * under whatever key the account has it.
+ * The usage endpoint's windows: its `limits` list (where a per-model week such
+ * as Fable lives), else the older `five_hour`/`seven_day*` keys that are set.
  */
 export const parseAccount = (text: string): Limit[] => {
   const body = JSON.parse(text) as Record<string, unknown>
+  if (Array.isArray(body.limits)) {
+    return sortLimits(
+      (body.limits as EndpointLimit[])
+        .filter(l => typeof l.percent === 'number')
+        .map(l => ({ kind: kindOf(l), percent: l.percent as number, resetsAt: l.resets_at })),
+    )
+  }
   const out: Limit[] = []
   for (const [kind, value] of Object.entries(body)) {
     if (!/^(five_hour|seven_day)/.test(kind) || /oauth_apps/.test(kind)) continue
@@ -186,7 +206,6 @@ export const register: Register = on => {
     if (e.props.hasSurvey || !snap) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
-    const barWidth = Math.max(10, Math.min(60, e.props.bodyColumns - 9 - 22))
     const percent = snap.percent ?? 0
     const level = levelColor(percent)
     const segs: Segment[] = snap.segments.length
@@ -195,41 +214,39 @@ export const register: Register = on => {
           { name: 'Used', tokens: snap.tokens ?? 0, color: OK_FILL, kind: 'used' },
           { name: 'Free', tokens: Math.max(0, snap.window - (snap.tokens ?? 0)), color: EMPTY, kind: 'free' },
         ]
-    const widths = cells(segs, barWidth)
     const used = segs.filter(s => s.kind === 'used')
+    const figures = snap.tokens !== undefined ? `  ${compact(snap.tokens)}/${compact(snap.window)}` : ''
+    const legend = used.map(s => `■ ${s.name} ${compact(s.tokens)}`)
+    const legendWidth = legend.reduce((sum, l) => sum + l.length + 2, 0)
+    const fixed = 'Context  '.length + 5 + figures.length + 3
+    const barWidth = Math.max(10, Math.min(60, e.props.bodyColumns - fixed - legendWidth))
+    const widths = cells(segs, barWidth)
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Text color={percent >= WARN ? level : undefined} bold>
-            {'Context  '}
+      <Box flexDirection="row">
+        <Text color={percent >= WARN ? level : undefined} bold>
+          {'Context  '}
+        </Text>
+        {segs.map((s, i) => (
+          <Text key={`${s.name}-${i}`} color={s.kind === 'free' ? EMPTY : s.kind === 'buffer' ? BUFFER : s.color}>
+            {(s.kind === 'used' ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT).repeat(widths[i] ?? 0)}
           </Text>
-          {segs.map((s, i) => (
-            <Text key={`${s.name}-${i}`} color={s.kind === 'free' ? EMPTY : s.kind === 'buffer' ? BUFFER : s.color}>
-              {(s.kind === 'used' ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT).repeat(widths[i] ?? 0)}
-            </Text>
-          ))}
-          <Text color={level} bold>
-            {` ${Math.round(percent)}%`.padStart(5)}
+        ))}
+        <Text color={level} bold>
+          {` ${Math.round(percent)}%`.padStart(5)}
+        </Text>
+        <Text dimColor>{`${figures}   `}</Text>
+        {used.map((s, i) => (
+          <Text key={`legend-${s.name}-${i}`} wrap="truncate">
+            <Text color={s.color}>■ </Text>
+            <Text dimColor>{`${s.name} ${compact(s.tokens)}  `}</Text>
           </Text>
-          <Text dimColor>{snap.tokens !== undefined ? `  ${compact(snap.tokens)}/${compact(snap.window)}` : ''}</Text>
-        </Box>
-        {used.length ? (
-          <Box flexDirection="row" flexWrap="wrap">
-            <Text>{'         '}</Text>
-            {used.map((s, i) => (
-              <Text key={`${s.name}-${i}`} wrap="truncate">
-                <Text color={s.color}>■ </Text>
-                <Text dimColor>{`${s.name} ${compact(s.tokens)}  `}</Text>
-              </Text>
-            ))}
-          </Box>
-        ) : null}
+        ))}
       </Box>
     )
   })
 
-  // Limits side by side under the prompt, the engine's hint line kept beneath.
+  // Limits in the footer row, after the engine's hint, on the same line.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const snap = await read($, snapshot)
     const acc = await read($, account)
@@ -238,31 +255,30 @@ export const register: Register = on => {
 
     const at = (await read($, now)) || Date.now()
     const { Box, Text } = $.ui.resolve(e)
-    const columns = e.viewport?.columns ?? 120
-    const barWidth = Math.max(6, Math.min(20, Math.floor((columns - 4) / limits.length) - 24))
+    const hint = e.props.hint
+    // The footer draws the mode label ("auto mode on · ") left of this row.
+    const room = (e.viewport?.columns ?? 120) - hint.length - 24
+    const perLimit = Math.floor(room / limits.length) - 5
+    const barWidth = Math.max(4, Math.min(20, perLimit - 20))
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          {limits.map((l, i) => {
-            const filled = Math.max(0, Math.min(barWidth, Math.round((l.percent / 100) * barWidth)))
-            const color = levelColor(l.percent)
-            const reset = until(l.resetsAt, at)
-            return (
-              <Box key={l.kind} flexDirection="row">
-                <Text dimColor>{i ? '  │  ' : ''}</Text>
-                <Text bold>{`${limitLabel(l.kind)} `}</Text>
-                <Text color={color}>{FULL.repeat(filled)}</Text>
-                <Text color={EMPTY}>{LIGHT.repeat(barWidth - filled)}</Text>
-                <Text color={color} bold>{` ${Math.round(l.percent)}%`}</Text>
-                <Text dimColor>{reset ? ` ↻${reset}` : ''}</Text>
-              </Box>
-            )
-          })}
-        </Box>
-        <Text dimColor wrap="truncate">
-          {e.props.hint}
-        </Text>
+      <Box flexDirection="row">
+        <Text dimColor>{hint ? `${hint}  ·  ` : ''}</Text>
+        {limits.map((l, i) => {
+          const filled = Math.max(0, Math.min(barWidth, Math.round((l.percent / 100) * barWidth)))
+          const color = levelColor(l.percent)
+          const reset = until(l.resetsAt, at)
+          return (
+            <Box key={l.kind} flexDirection="row">
+              <Text dimColor>{i ? '  │  ' : ''}</Text>
+              <Text bold>{`${limitLabel(l.kind)} `}</Text>
+              <Text color={color}>{FULL.repeat(filled)}</Text>
+              <Text color={EMPTY}>{LIGHT.repeat(barWidth - filled)}</Text>
+              <Text color={color} bold>{` ${Math.round(l.percent)}%`}</Text>
+              <Text dimColor>{reset ? ` ↻${reset}` : ''}</Text>
+            </Box>
+          )
+        })}
       </Box>
     )
   })
