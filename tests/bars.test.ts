@@ -1,12 +1,12 @@
 import { expect, test } from 'claude-code/testing'
 
-import { cells, compact, levelColor, limitLabel, until } from '../hooks/register'
+import { cells, compact, levelColor, limitLabel, mergeLimits, parseAccount, until } from '../hooks/register'
 
 test('labels the windows the account reports', () => {
   expect(limitLabel('five_hour')).toBe('5h')
   expect(limitLabel('seven_day')).toBe('Weekly')
-  expect(limitLabel('seven_day_fable')).toBe('Fable wk')
-  expect(limitLabel('seven_day_opus')).toBe('Opus wk')
+  expect(limitLabel('seven_day_fable')).toBe('Fable')
+  expect(limitLabel('seven_day_opus')).toBe('Opus')
 })
 
 test('colours by fill: blue, then orange from 70, red from 90', () => {
@@ -36,4 +36,20 @@ test('formats tokens and reset times', () => {
   expect(until('2026-11-11T12:14:00Z', at)).toBe('2h 14m')
   expect(until('2026-11-14T13:00:00Z', at)).toBe('3d 3h')
   expect(until(undefined, at)).toBe('')
+})
+
+test('reads every window the usage endpoint lists, per-model ones included', () => {
+  const limits = parseAccount(
+    JSON.stringify({
+      five_hour: { utilization: 41, resets_at: '2026-11-11T12:00:00Z' },
+      seven_day: { utilization: 76, resets_at: '2026-11-14T12:00:00Z' },
+      seven_day_fable: { utilization: 92.5, resets_at: '2026-11-14T12:00:00Z' },
+      seven_day_opus: null,
+      seven_day_oauth_apps: { utilization: 0 },
+      extra_usage: { is_enabled: false },
+    }),
+  )
+  expect(limits.map(l => l.kind)).toEqual(['five_hour', 'seven_day', 'seven_day_fable'])
+  const merged = mergeLimits([{ kind: 'five_hour', percent: 40 }, { kind: 'spend_limit', percent: 3 }], limits)
+  expect(merged.map(l => `${l.kind}:${l.percent}`)).toEqual(['five_hour:41', 'seven_day:76', 'seven_day_fable:92.5', 'spend_limit:3'])
 })

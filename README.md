@@ -1,18 +1,24 @@
 # usage-bars
 
-A Claude Code mod that keeps your limits and context in view, as progress bars above the prompt:
+A Claude Code mod that keeps your limits and context in view.
+
+Above the prompt, the context window split by category:
 
 ```
-5h       ████████████████░░░░░░░░░░░░░░░░░░░░░░░░   41%  ↻ 2h 14m
-Weekly   ██████████████████████████████░░░░░░░░░░   76%  ↻ 3d 3h
-Fable wk ████████████████████████████████████░░░░   92%  ↻ 3d 3h
-Context  █▌███████████░░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒▒   38%  76k/200k
+Context  ██████████████░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒▒   38%  76k/200k
          ■ System prompt 3k  ■ System tools 14k  ■ MCP tools 2k  ■ Messages 55k
 ```
 
-- **5h**, **Weekly** and any per-model weekly window your account reports (e.g. Fable); windows the account doesn't have are not shown.
+Under the prompt, the limits side by side:
+
+```
+5h ████████░░░░ 41% ↻2h 14m  │  Weekly █████████░░░ 76% ↻3d 3h  │  Fable ███████████░ 92% ↻3d 3h
+```
+
+- **5h**, **Weekly** and every per-model weekly window your account has (e.g. Fable), read from the account's usage endpoint; the engine sets the credential, the mod never sees it.
 - Bars go **blue** while fine, **orange** from 70 %, **red** from 90 %.
-- The context bar is split by category (system prompt, tools, MCP, memory, skills, messages…) in the same colours `/context` uses; `▒` is the autocompact buffer.
+- The context bar uses the colours `/context` uses; `▒` is the autocompact buffer.
+- `/usage-bars` prints the raw figures the bars are drawn from.
 
 ## Install
 
