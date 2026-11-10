@@ -1,0 +1,13 @@
+{
+  "name": "usage-bars",
+  "owner": {
+    "name": "PalmarHealer"
+  },
+  "plugins": [
+    {
+      "name": "usage-bars",
+      "source": "./"
+    }
+  ],
+  "description": "Usage and context progress bars for Claude Code"
+}
