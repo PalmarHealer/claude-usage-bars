@@ -11,7 +11,7 @@ Context  ██████████▒▒░░░░░░░░░░░�
 Under the prompt, the limits side by side after the footer hint:
 
 ```
-(shift+tab to cycle)  ·  5h ████████░░░░ 41% ↻2h 14m  │  Weekly █████████░░░ 76% ↻3d 3h  │  Fable ███████████░ 92% ↻3d 3h
+(shift+tab to cycle)  ·  5h ████████░░░░ 41%  ↻ 2h 14m  │  Weekly █████████░░░ 76%  ↻ 3d 3h  │  Fable ███████████░ 92%  ↻ 3d 3h
 ```
 
 - **5h**, **Weekly** and every per-model weekly window your account has (e.g. Fable), read from the account's usage endpoint; the engine sets the credential, the mod never sees it.

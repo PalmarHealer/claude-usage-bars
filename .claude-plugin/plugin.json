@@ -1,6 +1,6 @@
 {
   "name": "usage-bars",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Progress bars above the prompt for the 5h, weekly and model-weekly limits and the context window, coloured by fill and by context category",
   "types": "./types/index.d.ts",
   "author": {

@@ -259,7 +259,7 @@ export const register: Register = on => {
     // The footer draws the mode label ("auto mode on · ") left of this row.
     const room = (e.viewport?.columns ?? 120) - hint.length - 24
     const perLimit = Math.floor(room / limits.length) - 5
-    const barWidth = Math.max(4, Math.min(20, perLimit - 20))
+    const barWidth = Math.max(4, Math.min(20, perLimit - 22))
 
     return (
       <Box flexDirection="row">
@@ -275,7 +275,7 @@ export const register: Register = on => {
               <Text color={color}>{FULL.repeat(filled)}</Text>
               <Text color={EMPTY}>{LIGHT.repeat(barWidth - filled)}</Text>
               <Text color={color} bold>{` ${Math.round(l.percent)}%`}</Text>
-              <Text dimColor>{reset ? ` ↻${reset}` : ''}</Text>
+              <Text dimColor>{reset ? `  ↻ ${reset}` : ''}</Text>
             </Box>
           )
         })}
