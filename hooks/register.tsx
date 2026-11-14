@@ -9,7 +9,12 @@ const now = atom({ plugin: 'usage-bars', key: 'now' } as const, 0)
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const FETCH_EVERY = 5 * 60_000
-const FETCH_AT_MOST = 60_000
+/** A reading younger than this, from any session, is used as it is. */
+const FRESH_FOR = 4 * 60_000
+/** A forced reading (`/usage-bars`) still waits this long after the last one. */
+const FORCE_GAP = 30_000
+const BACKOFF_FIRST = 5 * 60_000
+const BACKOFF_MOST = 60 * 60_000
 
 const WARN = 70
 const CRIT = 90
@@ -256,10 +261,42 @@ const measure = async ($: EngineInterface) => {
   await update($, snapshot, () => toSnapshot(usage.context, usage.rateLimits))
 }
 
-/** Reads the account's windows; the engine sets the credential, the plugin never sees it. */
+/** What every session shares through the plugin's store, so they fetch once between them. */
+type Shared = { reading?: Account; backoffUntil?: number; backoff?: number }
+
+const SHARED_KEY = 'shared'
+
+const readShared = async ($: EngineInterface): Promise<Shared> => {
+  const v = await $.store.get(SHARED_KEY).catch(() => undefined)
+  return v && typeof v === 'object' ? (v as Shared) : {}
+}
+
+/** The wait after a refusal: the server's `retry-after` when it gives one, else doubling from 5 min to 1 h. */
+export const nextBackoff = (previous: number | undefined, retryAfter: string | undefined) => {
+  const seconds = Number(retryAfter)
+  if (retryAfter && Number.isFinite(seconds) && seconds > 0) return Math.min(BACKOFF_MOST, seconds * 1000)
+  return previous ? Math.min(BACKOFF_MOST, previous * 2) : BACKOFF_FIRST
+}
+
+/** Windows whose reset has passed say nothing about now; the engine's figure stands in for them. */
+export const current = (limits: Limit[], at: number) =>
+  limits.filter(l => !l.resetsAt || !(Date.parse(l.resetsAt) <= at))
+
+/**
+ * Reads the account's windows, at most once every few minutes across all
+ * sessions and never while the endpoint has asked to back off; the engine sets
+ * the credential, the plugin never sees it.
+ */
 const fetchAccount = async ($: EngineInterface, force = false) => {
-  const last = await read($, account)
-  if (!force && last && Date.now() - last.fetchedAt < FETCH_AT_MOST) return
+  const at = Date.now()
+  const shared = await readShared($)
+  const reading = shared.reading
+  const age = reading ? at - reading.fetchedAt : Infinity
+  const backingOff = (shared.backoffUntil ?? 0) > at
+  if (backingOff || age < (force ? FORCE_GAP : FRESH_FOR)) {
+    if (reading) await update($, account, () => reading)
+    return
+  }
   const auth = await $.session.authorize()
   if (!auth || auth.kind !== 'bearer') return
   const res = await $.http.fetch(USAGE_URL, {
@@ -267,11 +304,14 @@ const fetchAccount = async ($: EngineInterface, force = false) => {
     headers: { 'anthropic-beta': 'oauth-2025-04-20' },
   })
   if (!res.ok) {
-    await update($, account, a => (a ? { ...a, raw: `HTTP ${res.status}: ${res.text.slice(0, 500)}` } : a))
+    const backoff = nextBackoff(shared.backoff, res.headers['retry-after'])
+    await $.store.set(SHARED_KEY, { ...shared, backoff, backoffUntil: at + backoff })
+    const raw = `HTTP ${res.status}: ${res.text.slice(0, 500)} (next try in ${Math.round(backoff / 60_000)} min)`
+    await update($, account, a => ({ limits: a?.limits ?? reading?.limits ?? [], fetchedAt: a?.fetchedAt ?? 0, raw }))
     return
   }
-  const limits = parseAccount(res.text)
-  const fetched: Account = { limits, fetchedAt: Date.now(), raw: res.text }
+  const fetched: Account = { limits: parseAccount(res.text), fetchedAt: at, raw: res.text }
+  await $.store.set(SHARED_KEY, { reading: fetched })
   await update($, account, () => fetched)
 }
 
@@ -283,7 +323,7 @@ export const register: Register = on => {
     $.clock.every(FETCH_EVERY, () => void fetchAccount($).catch(() => undefined))
     await $.command.register({ name: 'usage-bars', description: 'Show the raw usage figures the bars are drawn from' })
     void measure($).catch(() => undefined)
-    void fetchAccount($, true).catch(() => undefined)
+    void fetchAccount($).catch(() => undefined)
     return result
   })
 
@@ -382,10 +422,10 @@ export const register: Register = on => {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const snap = await read($, snapshot)
     const acc = await read($, account)
-    const limits = mergeLimits(snap?.limits ?? [], acc?.limits ?? [])
+    const at = (await read($, now)) || Date.now()
+    const limits = mergeLimits(snap?.limits ?? [], current(acc?.limits ?? [], at))
     if (!limits.length) return next(e)
 
-    const at = (await read($, now)) || Date.now()
     const { Box, Text } = $.ui.resolve(e)
     const hint = e.props.hint
     const items: LimitCell[] = limits.map(l => ({

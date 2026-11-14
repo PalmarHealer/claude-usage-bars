@@ -3,12 +3,14 @@ import { expect, test } from 'claude-code/testing'
 import {
   cells,
   compact,
+  current,
   fitContext,
   fitLimits,
   legendText,
   levelColor,
   limitLabel,
   mergeLimits,
+  nextBackoff,
   parseAccount,
   rowWidth,
   until,
@@ -119,4 +121,17 @@ test('gives up limit detail before it overflows the footer', () => {
   const tight = fitLimits(45, hint, items)
   expect(tight.count).toBe(3)
   expect(tight.hint).toBe(false)
+})
+
+test('backs off after a refusal and drops windows that have reset', () => {
+  expect(nextBackoff(undefined, undefined)).toBe(5 * 60_000)
+  expect(nextBackoff(5 * 60_000, undefined)).toBe(10 * 60_000)
+  expect(nextBackoff(50 * 60_000, undefined)).toBe(60 * 60_000)
+  expect(nextBackoff(undefined, '120')).toBe(120_000)
+  const at = Date.parse('2026-11-14T12:00:00Z')
+  const limits = [
+    { kind: 'five_hour', percent: 80, resetsAt: '2026-11-14T11:00:00Z' },
+    { kind: 'seven_day', percent: 43, resetsAt: '2026-11-19T14:00:00Z' },
+  ]
+  expect(current(limits, at).map(l => l.kind)).toEqual(['seven_day'])
 })
