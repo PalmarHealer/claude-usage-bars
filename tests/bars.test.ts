@@ -1,6 +1,18 @@
 import { expect, test } from 'claude-code/testing'
 
-import { cells, compact, levelColor, limitLabel, mergeLimits, parseAccount, until } from '../hooks/register'
+import {
+  cells,
+  compact,
+  fitContext,
+  fitLimits,
+  legendText,
+  levelColor,
+  limitLabel,
+  mergeLimits,
+  parseAccount,
+  rowWidth,
+  until,
+} from '../hooks/register'
 
 test('labels the windows the account reports', () => {
   expect(limitLabel('five_hour')).toBe('5h')
@@ -66,4 +78,45 @@ test('reads the model-scoped week from the limits list', () => {
     }),
   )
   expect(limits.map(l => `${limitLabel(l.kind)}:${l.percent}`)).toEqual(['5h:11', 'Weekly:76', 'Fable:0'])
+})
+
+test('keeps the context row inside narrow bands', () => {
+  const used = [
+    { name: 'System prompt', tokens: 2_000, color: 'a', kind: 'used' as const },
+    { name: 'System tools', tokens: 38_000, color: 'b', kind: 'used' as const },
+    { name: 'MCP server instructions', tokens: 4_000, color: 'c', kind: 'used' as const },
+    { name: 'Messages', tokens: 260_000, color: 'd', kind: 'used' as const },
+  ]
+  const figures = '  306k/1M'
+  for (const cols of [20, 40, 60, 80, 100, 140, 200]) {
+    const fit = fitContext(cols, used, figures)
+    const width =
+      fit.label.length + fit.bar + 5 + (fit.showFigures ? figures.length : 0) +
+      (fit.legend.length ? 3 + fit.legend.reduce((s, i) => s + legendText(used[i]!).length, 0) : 0)
+    expect(width <= cols || fit.bar <= 10).toBe(true)
+    expect(fit.bar >= 3).toBe(true)
+  }
+  expect(fitContext(200, used, figures).legend).toEqual([0, 1, 2, 3])
+  const narrow = fitContext(60, used, figures)
+  expect(narrow.legend).toContain(3)
+  expect(narrow.second.length).toBeGreaterThan(0)
+  expect(narrow.second.reduce((s, i) => s + legendText(used[i]!).length, 0)).toBeLessThanOrEqual(60)
+})
+
+test('gives up limit detail before it overflows the footer', () => {
+  const items = [
+    { label: '5h', percent: 12, reset: '2h 14m' },
+    { label: 'Weekly', percent: 43, reset: '5d 13h' },
+    { label: 'Fable', percent: 41, reset: '5d 13h' },
+  ]
+  const hint = 'esc to interrupt'
+  for (let room = 0; room <= 160; room += 5) {
+    const fit = fitLimits(room, hint, items)
+    if (fit.count) expect(rowWidth(hint, items, fit)).toBeLessThanOrEqual(room)
+  }
+  const wide = fitLimits(160, hint, items)
+  expect(wide.hint && wide.count === 3 && wide.reset === 'full' && wide.bar === 20).toBe(true)
+  const tight = fitLimits(45, hint, items)
+  expect(tight.count).toBe(3)
+  expect(tight.hint).toBe(false)
 })

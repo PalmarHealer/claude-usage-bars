@@ -1,9 +1,10 @@
 {
   "name": "usage-bars",
-  "version": "0.1.1",
-  "description": "Progress bars above the prompt for the 5h, weekly and model-weekly limits and the context window, coloured by fill and by context category",
+  "version": "0.1.2",
+  "description": "Just another usage bar plugin: bars for the 5h, weekly and per-model limits and the context window, sized to fit narrow terminals",
   "types": "./types/index.d.ts",
   "author": {
     "name": "PalmarHealer"
-  }
+  },
+  "license": "GPL-3.0-only"
 }

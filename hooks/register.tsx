@@ -24,8 +24,7 @@ const FULL = '█'
 const LIGHT = '░'
 const MEDIUM = '▒'
 
-export const levelColor = (percent: number) =>
-  percent >= CRIT ? CRIT_FILL : percent >= WARN ? WARN_FILL : OK_FILL
+export const levelColor = (percent: number) => (percent >= CRIT ? CRIT_FILL : percent >= WARN ? WARN_FILL : OK_FILL)
 
 /** `five_hour` → `5h`, `seven_day` → `Weekly`, `seven_day_fable` → `Fable`. */
 export const limitLabel = (kind: string) => {
@@ -123,6 +122,118 @@ export const cells = (segments: Segment[], width: number) => {
   return out
 }
 
+/** What the context row shows at a given width. */
+export type ContextFit = { label: string; showFigures: boolean; legend: number[]; second: number[]; bar: number }
+
+const CTX_MIN_BAR = 10
+const CTX_PREF_BAR = 24
+const CTX_MAX_BAR = 60
+const PCT_WIDTH = 5
+const LEGEND_GAP = 3
+
+export const legendText = (s: Segment) => `■ ${s.name} ${compact(s.tokens)}  `
+
+/** The legend entries the first row left out that fit on a row of their own, in order. */
+const secondRow = (cols: number, used: Segment[], first: number[]) => {
+  let budget = cols
+  const out: number[] = []
+  used.forEach((s, i) => {
+    if (first.includes(i)) return
+    const w = legendText(s).length
+    if (w <= budget) {
+      out.push(i)
+      budget -= w
+    }
+  })
+  return out
+}
+
+/**
+ * Lays the context row out in `cols` cells: the bar and percent always, then the
+ * figures, then as many legend entries as fit (largest first, drawn in order);
+ * the entries left over go on a second row, as many of those as fit there.
+ */
+export const fitContext = (cols: number, used: Segment[], figures: string): ContextFit => {
+  let label = 'Context  '
+  let showFigures = figures.length > 0
+  const core = () => label.length + PCT_WIDTH + (showFigures ? figures.length : 0)
+  if (core() + CTX_MIN_BAR > cols) showFigures = false
+  if (core() + CTX_MIN_BAR > cols) label = 'Ctx '
+  if (core() + CTX_MIN_BAR > cols)
+    return { label, showFigures, legend: [], second: secondRow(cols, used, []), bar: Math.max(3, cols - core()) }
+
+  let budget = cols - core() - Math.min(CTX_PREF_BAR, Math.max(CTX_MIN_BAR, cols - core() - 40)) - LEGEND_GAP
+  const legend: number[] = []
+  used
+    .map((s, i) => ({ i, s }))
+    .sort((a, b) => b.s.tokens - a.s.tokens)
+    .forEach(({ i, s }) => {
+      const w = legendText(s).length
+      if (w <= budget) {
+        legend.push(i)
+        budget -= w
+      }
+    })
+  legend.sort((a, b) => a - b)
+  const legendWidth = legend.reduce((sum, i) => sum + legendText(used[i] as Segment).length, 0)
+  const rest = cols - core() - (legend.length ? LEGEND_GAP + legendWidth : 0)
+  return {
+    label,
+    showFigures,
+    legend,
+    second: secondRow(cols, used, legend),
+    bar: Math.max(CTX_MIN_BAR, Math.min(CTX_MAX_BAR, rest)),
+  }
+}
+
+/** What the limits row shows at a given width. */
+export type LimitsFit = { hint: boolean; count: number; bar: number; reset: 'full' | 'short' | 'none'; sep: string }
+
+export type LimitCell = { label: string; percent: number; reset: string }
+
+export const shortReset = (reset: string) => reset.split(' ')[0] ?? ''
+
+const limitWidth = (l: LimitCell, fit: LimitsFit) =>
+  l.label.length +
+  1 +
+  fit.bar +
+  ` ${Math.round(l.percent)}%`.length +
+  (!l.reset || fit.reset === 'none' ? 0 : 4 + (fit.reset === 'short' ? shortReset(l.reset) : l.reset).length)
+
+export const rowWidth = (hint: string, items: LimitCell[], fit: LimitsFit) =>
+  (fit.hint && hint ? hint.length + 5 : 0) +
+  items.slice(0, fit.count).reduce((sum, l) => sum + limitWidth(l, fit), 0) +
+  Math.max(0, fit.count - 1) * fit.sep.length
+
+type Step = Omit<LimitsFit, 'hint' | 'count'>
+const WIDE = '  │  '
+const NARROW = ' │ '
+const STEPS: Step[] = [
+  ...Array.from({ length: 13 }, (_, k): Step => ({ bar: 20 - k, reset: 'full', sep: WIDE })),
+  { bar: 8, reset: 'short', sep: WIDE },
+  { bar: 6, reset: 'short', sep: NARROW },
+  { bar: 6, reset: 'none', sep: NARROW },
+  { bar: 4, reset: 'none', sep: NARROW },
+  { bar: 0, reset: 'none', sep: NARROW },
+]
+
+/**
+ * Lays the limits out in `room` cells, giving up detail in this order: bar
+ * length, the reset's minutes, the reset, the bar, the engine's hint, then the
+ * last windows.
+ */
+export const fitLimits = (room: number, hint: string, items: LimitCell[]): LimitsFit => {
+  for (const withHint of [true, false]) {
+    for (const step of STEPS) {
+      const fit = { ...step, hint: withHint, count: items.length }
+      if (rowWidth(hint, items, fit) <= room) return fit
+    }
+  }
+  const last: LimitsFit = { ...(STEPS[STEPS.length - 1] as Step), hint: false, count: items.length }
+  while (last.count > 0 && rowWidth(hint, items, last) > room) last.count--
+  return last
+}
+
 const toLimits = (rateLimits: SessionRateLimit[]): Limit[] =>
   sortLimits(rateLimits.map(r => ({ kind: r.kind, percent: r.percentUsed, resetsAt: r.resetsAt })))
 
@@ -216,32 +327,53 @@ export const register: Register = on => {
         ]
     const used = segs.filter(s => s.kind === 'used')
     const figures = snap.tokens !== undefined ? `  ${compact(snap.tokens)}/${compact(snap.window)}` : ''
-    const legend = used.map(s => `■ ${s.name} ${compact(s.tokens)}`)
-    const legendWidth = legend.reduce((sum, l) => sum + l.length + 2, 0)
-    const fixed = 'Context  '.length + 5 + figures.length + 3
-    const barWidth = Math.max(10, Math.min(60, e.props.bodyColumns - fixed - legendWidth))
-    const widths = cells(segs, barWidth)
+    // One cell spare: a row exactly as wide as the band wraps on some terminals.
+    const fit = fitContext(e.props.bodyColumns - 1, used, figures)
+    const widths = cells(segs, fit.bar)
+
+    const legendItem = (i: number) => {
+      const s = used[i] as Segment
+      return (
+        <Text key={`legend-${s.name}-${i}`} wrap="truncate">
+          <Text color={s.color}>■ </Text>
+          <Text dimColor>{`${s.name} ${compact(s.tokens)}  `}</Text>
+        </Text>
+      )
+    }
 
     return (
-      <Box flexDirection="row">
-        <Text color={percent >= WARN ? level : undefined} bold>
-          {'Context  '}
-        </Text>
-        {segs.map((s, i) => (
-          <Text key={`${s.name}-${i}`} color={s.kind === 'free' ? EMPTY : s.kind === 'buffer' ? BUFFER : s.color}>
-            {(s.kind === 'used' ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT).repeat(widths[i] ?? 0)}
+      <Box flexDirection="column">
+        <Box flexDirection="row" flexWrap="nowrap">
+          <Text color={percent >= WARN ? level : undefined} bold wrap="truncate">
+            {fit.label}
           </Text>
-        ))}
-        <Text color={level} bold>
-          {` ${Math.round(percent)}%`.padStart(5)}
-        </Text>
-        <Text dimColor>{`${figures}   `}</Text>
-        {used.map((s, i) => (
-          <Text key={`legend-${s.name}-${i}`} wrap="truncate">
-            <Text color={s.color}>■ </Text>
-            <Text dimColor>{`${s.name} ${compact(s.tokens)}  `}</Text>
+          {segs.map((s, i) =>
+            widths[i] ? (
+              <Text
+                key={`${s.name}-${i}`}
+                color={s.kind === 'free' ? EMPTY : s.kind === 'buffer' ? BUFFER : s.color}
+                wrap="truncate"
+              >
+                {(s.kind === 'used' ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT).repeat(widths[i] ?? 0)}
+              </Text>
+            ) : null,
+          )}
+          <Text color={level} bold wrap="truncate">
+            {` ${Math.round(percent)}%`.padStart(PCT_WIDTH)}
           </Text>
-        ))}
+          {fit.showFigures ? (
+            <Text dimColor wrap="truncate">
+              {figures}
+            </Text>
+          ) : null}
+          {fit.legend.length ? <Text wrap="truncate">{' '.repeat(LEGEND_GAP)}</Text> : null}
+          {fit.legend.map(legendItem)}
+        </Box>
+        {fit.second.length ? (
+          <Box flexDirection="row" flexWrap="nowrap">
+            {fit.second.map(legendItem)}
+          </Box>
+        ) : null}
       </Box>
     )
   })
@@ -256,26 +388,32 @@ export const register: Register = on => {
     const at = (await read($, now)) || Date.now()
     const { Box, Text } = $.ui.resolve(e)
     const hint = e.props.hint
-    // The footer draws the mode label ("auto mode on · ") left of this row.
-    const room = (e.viewport?.columns ?? 120) - hint.length - 24
-    const perLimit = Math.floor(room / limits.length) - 5
-    const barWidth = Math.max(4, Math.min(20, perLimit - 22))
+    const items: LimitCell[] = limits.map(l => ({
+      label: limitLabel(l.kind),
+      percent: l.percent,
+      reset: until(l.resetsAt, at),
+    }))
+    // The footer draws the mode label left of this row ("⏵⏵ auto mode on (shift+tab to cycle) · "),
+    // which the hook is not told; reserve its longest form, less what the hint already holds.
+    const reserve = /shift\+tab/.test(hint) ? 22 : 42
+    const fit = fitLimits((e.viewport?.columns ?? 120) - reserve, hint, items)
+    if (!fit.count) return next(e)
 
     return (
-      <Box flexDirection="row">
-        <Text dimColor>{hint ? `${hint}  ·  ` : ''}</Text>
-        {limits.map((l, i) => {
-          const filled = Math.max(0, Math.min(barWidth, Math.round((l.percent / 100) * barWidth)))
+      <Box flexDirection="row" flexWrap="nowrap">
+        {fit.hint && hint ? <Text dimColor wrap="truncate">{`${hint}  ·  `}</Text> : null}
+        {items.slice(0, fit.count).map((l, i) => {
+          const filled = Math.max(0, Math.min(fit.bar, Math.round((l.percent / 100) * fit.bar)))
           const color = levelColor(l.percent)
-          const reset = until(l.resetsAt, at)
+          const reset = fit.reset === 'none' ? '' : fit.reset === 'short' ? shortReset(l.reset) : l.reset
           return (
-            <Box key={l.kind} flexDirection="row">
-              <Text dimColor>{i ? '  │  ' : ''}</Text>
-              <Text bold>{`${limitLabel(l.kind)} `}</Text>
-              <Text color={color}>{FULL.repeat(filled)}</Text>
-              <Text color={EMPTY}>{LIGHT.repeat(barWidth - filled)}</Text>
+            <Box key={`${l.label}-${i}`} flexDirection="row" flexShrink={0}>
+              {i ? <Text dimColor>{fit.sep}</Text> : null}
+              <Text bold>{`${l.label} `}</Text>
+              {fit.bar ? <Text color={color}>{FULL.repeat(filled)}</Text> : null}
+              {fit.bar ? <Text color={EMPTY}>{LIGHT.repeat(fit.bar - filled)}</Text> : null}
               <Text color={color} bold>{` ${Math.round(l.percent)}%`}</Text>
-              <Text dimColor>{reset ? `  ↻ ${reset}` : ''}</Text>
+              {reset ? <Text dimColor>{`  ↻ ${reset}`}</Text> : null}
             </Box>
           )
         })}
