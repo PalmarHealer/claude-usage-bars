@@ -6,6 +6,7 @@ import type { Account, Limit, Segment, Snapshot } from '../types'
 const snapshot = atom({ plugin: 'usage-bars', key: 'snapshot' } as const, null)
 const account = atom({ plugin: 'usage-bars', key: 'account' } as const, null)
 const now = atom({ plugin: 'usage-bars', key: 'now' } as const, 0)
+const frame = atom({ plugin: 'usage-bars', key: 'frame' } as const, 0)
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const FETCH_EVERY = 5 * 60_000
@@ -15,21 +16,113 @@ const FRESH_FOR = 4 * 60_000
 const FORCE_GAP = 30_000
 const BACKOFF_FIRST = 5 * 60_000
 const BACKOFF_MOST = 60 * 60_000
+const FRAME_MS = 120
 
-const WARN = 70
-const CRIT = 90
-
-const OK_FILL = '#5f87d7'
-const WARN_FILL = '#ffaf00'
-const CRIT_FILL = '#ff5f5f'
-const EMPTY = '#4e4e4e'
 const BUFFER = '#6c6c6c'
+/** Text drawn on a filled cell, and on an empty one, in overlay mode. */
+const ON_FILL = '#1c1c1c'
+const ON_EMPTY = '#e4e4e4'
 
+// With the `solid` style the bars draw these glyphs on a background of their own
+// colour: a solid cell where the terminal paints backgrounds, the glyph where not.
 const FULL = '█'
 const LIGHT = '░'
 const MEDIUM = '▒'
 
-export const levelColor = (percent: number) => (percent >= CRIT ? CRIT_FILL : percent >= WARN ? WARN_FILL : OK_FILL)
+/** What the person can set in `/config`; `readConfig` turns the stored options into this. */
+export type Config = {
+  /** `compact` always draws the label and percent on the bar; `auto` only when there is no room. */
+  layout: 'auto' | 'compact'
+  /** `solid` paints a background under the bar glyphs; `glyphs` draws the glyphs alone. */
+  style: 'solid' | 'glyphs'
+  animation: 'off' | 'wave' | 'pulse'
+  showContext: boolean
+  showLimits: boolean
+  showBars: boolean
+  showPercent: boolean
+  showTokens: boolean
+  showLegend: boolean
+  showResets: boolean
+  /** `categories`: the context bar in the colours `/context` uses; `level`: in the fill colour. */
+  contextColors: 'categories' | 'level'
+  okColor: string
+  warnColor: string
+  critColor: string
+  emptyColor: string
+  warnAt: number
+  critAt: number
+}
+
+export const DEFAULTS: Config = {
+  layout: 'auto',
+  style: 'solid',
+  animation: 'off',
+  showContext: true,
+  showLimits: true,
+  showBars: true,
+  showPercent: true,
+  showTokens: true,
+  showLegend: true,
+  showResets: true,
+  contextColors: 'categories',
+  okColor: '#5f87d7',
+  warnColor: '#ffaf00',
+  critColor: '#ff5f5f',
+  emptyColor: '#4e4e4e',
+  warnAt: 70,
+  critAt: 90,
+}
+
+const HEX = /^#?([0-9a-f]{6})$/i
+
+/** The stored options over the defaults; a value of the wrong kind, or a colour that is not `#rrggbb`, is left at its default. */
+export const readConfig = (options: Readonly<Record<string, unknown>> = {}): Config => {
+  const out: Record<string, unknown> = { ...DEFAULTS }
+  for (const [key, fallback] of Object.entries(DEFAULTS)) {
+    const v = options[key]
+    if (typeof v !== typeof fallback) continue
+    if (key.endsWith('Color')) {
+      const m = HEX.exec((v as string).trim())
+      if (m) out[key] = `#${m[1]}`
+    } else if (typeof v === 'number') {
+      if (Number.isFinite(v)) out[key] = Math.max(0, Math.min(100, v))
+    } else out[key] = v
+  }
+  return out as Config
+}
+
+let config: Config = DEFAULTS
+
+export const levelColor = (percent: number, c: Config = DEFAULTS) =>
+  percent >= c.critAt ? c.critColor : percent >= c.warnAt ? c.warnColor : c.okColor
+
+/** `hex` moved `t` of the way to white; a colour that is not hex is left as it is. */
+export const lighten = (hex: string, t: number) => {
+  const m = HEX.exec(hex)
+  if (!m || t <= 0) return hex
+  const n = parseInt(m[1] as string, 16)
+  const ch = (shift: number) => {
+    const v = (n >> shift) & 255
+    return Math.round(v + (255 - v) * Math.min(1, t))
+      .toString(16)
+      .padStart(2, '0')
+  }
+  return `#${ch(16)}${ch(8)}${ch(0)}`
+}
+
+/** How much brighter cell `i` of a filled run is at animation frame `f`, in steps of 0.05. */
+export const glow = (animation: Config['animation'], f: number, i: number) => {
+  const raw =
+    animation === 'wave'
+      ? 0.4 * (0.5 + 0.5 * Math.sin(f * 0.5 - i * 0.45)) ** 3
+      : animation === 'pulse'
+        ? 0.3 * (0.5 + 0.5 * Math.sin(f * 0.3))
+        : 0
+  return Math.round(raw * 20) / 20
+}
+
+/** The percent is kept whenever the bars are hidden, so a limit still says something. */
+const showPct = (c: Config) => c.showPercent || !c.showBars
 
 /** `five_hour` → `5h`, `seven_day` → `Weekly`, `seven_day_fable` → `Fable`. */
 export const limitLabel = (kind: string) => {
@@ -127,8 +220,18 @@ export const cells = (segments: Segment[], width: number) => {
   return out
 }
 
-/** What the context row shows at a given width. */
-export type ContextFit = { label: string; showFigures: boolean; legend: number[]; second: number[]; bar: number }
+/**
+ * What the context row shows at a given width. With `overlay` the label and
+ * percent are drawn on the bar, which is then `bar` cells wide in all.
+ */
+export type ContextFit = {
+  label: string
+  showFigures: boolean
+  legend: number[]
+  second: number[]
+  bar: number
+  overlay?: boolean
+}
 
 const CTX_MIN_BAR = 10
 const CTX_PREF_BAR = 24
@@ -153,21 +256,30 @@ const secondRow = (cols: number, used: Segment[], first: number[]) => {
   return out
 }
 
-/**
- * Lays the context row out in `cols` cells: the bar and percent always, then the
- * figures, then as many legend entries as fit (largest first, drawn in order);
- * the entries left over go on a second row, as many of those as fit there.
- */
-export const fitContext = (cols: number, used: Segment[], figures: string): ContextFit => {
-  let label = 'Context  '
-  let showFigures = figures.length > 0
-  const core = () => label.length + PCT_WIDTH + (showFigures ? figures.length : 0)
-  if (core() + CTX_MIN_BAR > cols) showFigures = false
-  if (core() + CTX_MIN_BAR > cols) label = 'Ctx '
-  if (core() + CTX_MIN_BAR > cols)
-    return { label, showFigures, legend: [], second: secondRow(cols, used, []), bar: Math.max(3, cols - core()) }
+/** ` Context  12% `, padded to `width`: what the bar is drawn behind in overlay mode. */
+export const overlayContext = (label: string, percent: number, width: number, pct = true) =>
+  ` ${label}${pct ? ` ${Math.round(percent)}%`.padStart(PCT_WIDTH) : ''} `.padEnd(width)
 
-  let budget = cols - core() - Math.min(CTX_PREF_BAR, Math.max(CTX_MIN_BAR, cols - core() - 40)) - LEGEND_GAP
+const overlayMin = (label: string, c: Config) => label.length + (showPct(c) ? PCT_WIDTH : 0) + 2
+
+/** One way to lay the row out, or nothing when it does not fit in `cols`. */
+const tryContext = (
+  cols: number,
+  used: Segment[],
+  figures: string,
+  label: string,
+  overlay: boolean,
+  showFigures: boolean,
+  c: Config,
+): ContextFit | undefined => {
+  const fixed = overlay ? 0 : label.length + (showPct(c) ? PCT_WIDTH : 0)
+  const minBar = overlay ? overlayMin(label, c) : c.showBars ? CTX_MIN_BAR : 0
+  const prefBar = c.showBars ? Math.max(minBar, CTX_PREF_BAR) : 0
+  const maxBar = c.showBars ? Math.max(minBar, CTX_MAX_BAR) : 0
+  const core = fixed + (showFigures ? figures.length : 0)
+  if (core + minBar > cols) return undefined
+
+  let budget = cols - core - Math.min(prefBar, Math.max(minBar, cols - core - 40)) - LEGEND_GAP
   const legend: number[] = []
   used
     .map((s, i) => ({ i, s }))
@@ -181,33 +293,71 @@ export const fitContext = (cols: number, used: Segment[], figures: string): Cont
     })
   legend.sort((a, b) => a - b)
   const legendWidth = legend.reduce((sum, i) => sum + legendText(used[i] as Segment).length, 0)
-  const rest = cols - core() - (legend.length ? LEGEND_GAP + legendWidth : 0)
+  const rest = cols - core - (legend.length ? LEGEND_GAP + legendWidth : 0)
   return {
     label,
     showFigures,
     legend,
     second: secondRow(cols, used, legend),
-    bar: Math.max(CTX_MIN_BAR, Math.min(CTX_MAX_BAR, rest)),
+    bar: Math.max(minBar, Math.min(maxBar, rest)),
+    overlay: overlay || undefined,
   }
 }
 
-/** What the limits row shows at a given width. */
-export type LimitsFit = { hint: boolean; count: number; bar: number; reset: 'full' | 'short' | 'none'; sep: string }
+/**
+ * Lays the context row out in `cols` cells: the bar and percent always, then the
+ * figures, then as many legend entries as fit (largest first, drawn in order);
+ * the entries left over go on a second row, as many of those as fit there.
+ * Too narrow for a bar of its own (or set to `compact`), the label and percent
+ * go on the bar, then the figures go, then the label shortens.
+ */
+export const fitContext = (cols: number, used: Segment[], figures: string, c: Config = DEFAULTS): ContextFit => {
+  const fig = figures.length > 0
+  const ways: [string, boolean, boolean][] = !c.showBars
+    ? [['Context  ', false, fig], ['Context  ', false, false], ['Ctx ', false, false]]
+    : [
+        ...(c.layout === 'compact' ? [] : [['Context  ', false, fig] as [string, boolean, boolean]]),
+        ['Context', true, fig],
+        ['Context', true, false],
+        ['Ctx', true, false],
+      ]
+  for (const [label, overlay, showFigures] of ways) {
+    const fit = tryContext(cols, used, figures, label, overlay, showFigures, c)
+    if (fit) return fit
+  }
+  const [label, overlay] = ways[ways.length - 1] as [string, boolean, boolean]
+  const minBar = overlay ? overlayMin(label, c) : 0
+  return { label, showFigures: false, legend: [], second: secondRow(cols, used, []), bar: minBar, overlay: overlay || undefined }
+}
+
+/** What the limits row shows at a given width. `overlay`: the label and percent are drawn on the bar. */
+export type LimitsFit = {
+  hint: boolean
+  count: number
+  bar: number
+  overlay?: boolean
+  reset: 'full' | 'short' | 'none'
+  sep: string
+}
 
 export type LimitCell = { label: string; percent: number; reset: string }
 
 export const shortReset = (reset: string) => reset.split(' ')[0] ?? ''
 
-const limitWidth = (l: LimitCell, fit: LimitsFit) =>
-  l.label.length +
-  1 +
-  fit.bar +
-  ` ${Math.round(l.percent)}%`.length +
+const pctText = (l: LimitCell) => ` ${Math.round(l.percent)}%`
+
+/** ` 5h 41% `: the text the bar is drawn behind in overlay mode. */
+export const overlayText = (l: LimitCell, c: Config = DEFAULTS) => ` ${l.label}${showPct(c) ? pctText(l) : ''} `
+
+const limitWidth = (l: LimitCell, fit: LimitsFit, c: Config) =>
+  (fit.overlay
+    ? overlayText(l, c).length
+    : l.label.length + (fit.bar ? 1 + fit.bar : 0) + (showPct(c) ? pctText(l).length : 0)) +
   (!l.reset || fit.reset === 'none' ? 0 : 4 + (fit.reset === 'short' ? shortReset(l.reset) : l.reset).length)
 
-export const rowWidth = (hint: string, items: LimitCell[], fit: LimitsFit) =>
+export const rowWidth = (hint: string, items: LimitCell[], fit: LimitsFit, c: Config = DEFAULTS) =>
   (fit.hint && hint ? hint.length + 5 : 0) +
-  items.slice(0, fit.count).reduce((sum, l) => sum + limitWidth(l, fit), 0) +
+  items.slice(0, fit.count).reduce((sum, l) => sum + limitWidth(l, fit, c), 0) +
   Math.max(0, fit.count - 1) * fit.sep.length
 
 type Step = Omit<LimitsFit, 'hint' | 'count'>
@@ -217,26 +367,87 @@ const STEPS: Step[] = [
   ...Array.from({ length: 13 }, (_, k): Step => ({ bar: 20 - k, reset: 'full', sep: WIDE })),
   { bar: 8, reset: 'short', sep: WIDE },
   { bar: 6, reset: 'short', sep: NARROW },
-  { bar: 6, reset: 'none', sep: NARROW },
-  { bar: 4, reset: 'none', sep: NARROW },
+  { bar: 0, overlay: true, reset: 'short', sep: NARROW },
+  { bar: 0, overlay: true, reset: 'none', sep: NARROW },
+]
+const BARLESS: Step[] = [
+  { bar: 0, reset: 'full', sep: WIDE },
+  { bar: 0, reset: 'short', sep: WIDE },
+  { bar: 0, reset: 'short', sep: NARROW },
   { bar: 0, reset: 'none', sep: NARROW },
 ]
+const COMPACT: Step[] = BARLESS.map(s => ({ ...s, overlay: true }))
+
+const stepsFor = (c: Config): Step[] => {
+  const steps = !c.showBars ? BARLESS : c.layout === 'compact' ? COMPACT : STEPS
+  return c.showResets ? steps : steps.map(s => ({ ...s, reset: 'none' }))
+}
 
 /**
  * Lays the limits out in `room` cells, giving up detail in this order: bar
- * length, the reset's minutes, the reset, the bar, the engine's hint, then the
- * last windows.
+ * length, the reset's minutes, the bar's own cells (it moves behind the text),
+ * the reset, the engine's hint, then the last windows.
  */
-export const fitLimits = (room: number, hint: string, items: LimitCell[]): LimitsFit => {
+export const fitLimits = (room: number, hint: string, items: LimitCell[], c: Config = DEFAULTS): LimitsFit => {
+  const steps = stepsFor(c)
   for (const withHint of [true, false]) {
-    for (const step of STEPS) {
+    for (const step of steps) {
       const fit = { ...step, hint: withHint, count: items.length }
-      if (rowWidth(hint, items, fit) <= room) return fit
+      if (rowWidth(hint, items, fit, c) <= room) return fit
     }
   }
-  const last: LimitsFit = { ...(STEPS[STEPS.length - 1] as Step), hint: false, count: items.length }
-  while (last.count > 0 && rowWidth(hint, items, last) > room) last.count--
+  const last: LimitsFit = { ...(steps[steps.length - 1] as Step), hint: false, count: items.length }
+  while (last.count > 0 && rowWidth(hint, items, last, c) > room) last.count--
   return last
+}
+
+/** One terminal cell of a bar. */
+export type Cell = { ch: string; fg?: string; bg?: string; bold?: boolean }
+
+/** Neighbouring cells of one style merged, so a bar is a handful of Text runs. */
+export const runs = (cells: Cell[]) => {
+  const out: Cell[] = []
+  for (const cell of cells) {
+    const last = out[out.length - 1]
+    if (last && last.fg === cell.fg && last.bg === cell.bg && last.bold === cell.bold) last.ch += cell.ch
+    else out.push({ ...cell })
+  }
+  return out
+}
+
+/** One bar cell: `text` drawn on `color` in overlay mode, else the glyph, on a matching background when `solid`. */
+const barCell = (c: Config, color: string, filled: boolean, glyph: string, text?: string): Cell =>
+  text !== undefined
+    ? { ch: text, fg: filled ? ON_FILL : ON_EMPTY, bg: color, bold: true }
+    : { ch: glyph, fg: color, bg: c.style === 'solid' ? color : undefined }
+
+/** The context bar's cells: each category's share, its label and percent on it in overlay mode. */
+export const contextCells = (segs: Segment[], fit: ContextFit, percent: number, c: Config, f = 0): Cell[] => {
+  const widths = cells(segs, fit.bar)
+  const text = fit.overlay ? overlayContext(fit.label, percent, fit.bar, showPct(c)) : undefined
+  const out: Cell[] = []
+  segs.forEach((s, i) => {
+    for (let n = 0; n < (widths[i] ?? 0); n++) {
+      const k = out.length
+      const used = s.kind === 'used'
+      const base =
+        s.kind === 'free' ? c.emptyColor : s.kind === 'buffer' ? BUFFER : c.contextColors === 'level' ? levelColor(percent, c) : s.color
+      const color = used ? lighten(base, glow(c.animation, f, k)) : base
+      out.push(barCell(c, color, used, used ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT, text?.[k]))
+    }
+  })
+  return out
+}
+
+/** A limit's bar cells: `width` cells, the filled share in its level colour. */
+export const limitCells = (l: LimitCell, width: number, c: Config, f = 0, text?: string): Cell[] => {
+  const filled = Math.max(0, Math.min(width, Math.round((l.percent / 100) * width)))
+  const level = levelColor(l.percent, c)
+  return Array.from({ length: width }, (_, k) =>
+    k < filled
+      ? barCell(c, lighten(level, glow(c.animation, f, k)), true, FULL, text?.[k])
+      : barCell(c, c.emptyColor, false, LIGHT, text?.[k]),
+  )
 }
 
 const toLimits = (rateLimits: SessionRateLimit[]): Limit[] =>
@@ -315,12 +526,15 @@ const fetchAccount = async ($: EngineInterface, force = false) => {
   await update($, account, () => fetched)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  config = readConfig(options)
+
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await update($, now, () => Date.now())
     $.clock.every(30_000, () => void update($, now, () => Date.now()))
     $.clock.every(FETCH_EVERY, () => void fetchAccount($).catch(() => undefined))
+    if (config.animation !== 'off') $.clock.every(FRAME_MS, () => void update($, frame, f => (f + 1) % 100_000))
     await $.command.register({ name: 'usage-bars', description: 'Show the raw usage figures the bars are drawn from' })
     void measure($).catch(() => undefined)
     void fetchAccount($).catch(() => undefined)
@@ -353,23 +567,26 @@ export const register: Register = on => {
 
   // Context above the prompt.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const snap = await read($, snapshot)
+    const c = config
+    const snap = c.showContext ? await read($, snapshot) : null
     if (e.props.hasSurvey || !snap) return next(e)
+    const f = c.animation === 'off' ? 0 : await read($, frame)
 
     const { Box, Text } = $.ui.resolve(e)
     const percent = snap.percent ?? 0
-    const level = levelColor(percent)
+    const level = levelColor(percent, c)
     const segs: Segment[] = snap.segments.length
       ? snap.segments
       : [
-          { name: 'Used', tokens: snap.tokens ?? 0, color: OK_FILL, kind: 'used' },
-          { name: 'Free', tokens: Math.max(0, snap.window - (snap.tokens ?? 0)), color: EMPTY, kind: 'free' },
+          { name: 'Used', tokens: snap.tokens ?? 0, color: c.okColor, kind: 'used' },
+          { name: 'Free', tokens: Math.max(0, snap.window - (snap.tokens ?? 0)), color: c.emptyColor, kind: 'free' },
         ]
-    const used = segs.filter(s => s.kind === 'used')
-    const figures = snap.tokens !== undefined ? `  ${compact(snap.tokens)}/${compact(snap.window)}` : ''
+    const used = c.showLegend ? segs.filter(s => s.kind === 'used') : []
+    const figures =
+      c.showTokens && snap.tokens !== undefined ? `  ${compact(snap.tokens)}/${compact(snap.window)}` : ''
     // One cell spare: a row exactly as wide as the band wraps on some terminals.
-    const fit = fitContext(e.props.bodyColumns - 1, used, figures)
-    const widths = cells(segs, fit.bar)
+    const fit = fitContext(e.props.bodyColumns - 1, used, figures, c)
+    const bar = c.showBars ? runs(contextCells(segs, fit, percent, c, f)) : []
 
     const legendItem = (i: number) => {
       const s = used[i] as Segment
@@ -384,23 +601,21 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" flexWrap="nowrap">
-          <Text color={percent >= WARN ? level : undefined} bold wrap="truncate">
-            {fit.label}
-          </Text>
-          {segs.map((s, i) =>
-            widths[i] ? (
-              <Text
-                key={`${s.name}-${i}`}
-                color={s.kind === 'free' ? EMPTY : s.kind === 'buffer' ? BUFFER : s.color}
-                wrap="truncate"
-              >
-                {(s.kind === 'used' ? FULL : s.kind === 'buffer' ? MEDIUM : LIGHT).repeat(widths[i] ?? 0)}
-              </Text>
-            ) : null,
+          {fit.overlay ? null : (
+            <Text color={percent >= c.warnAt ? level : undefined} bold wrap="truncate">
+              {fit.label}
+            </Text>
           )}
-          <Text color={level} bold wrap="truncate">
-            {` ${Math.round(percent)}%`.padStart(PCT_WIDTH)}
-          </Text>
+          {bar.map((r, i) => (
+            <Text key={`bar-${i}`} color={r.fg} backgroundColor={r.bg} bold={r.bold} wrap="truncate">
+              {r.ch}
+            </Text>
+          ))}
+          {fit.overlay || !showPct(c) ? null : (
+            <Text color={level} bold wrap="truncate">
+              {` ${Math.round(percent)}%`.padStart(PCT_WIDTH)}
+            </Text>
+          )}
           {fit.showFigures ? (
             <Text dimColor wrap="truncate">
               {figures}
@@ -420,11 +635,14 @@ export const register: Register = on => {
 
   // Limits in the footer row, after the engine's hint, on the same line.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const c = config
+    if (!c.showLimits) return next(e)
     const snap = await read($, snapshot)
     const acc = await read($, account)
     const at = (await read($, now)) || Date.now()
     const limits = mergeLimits(snap?.limits ?? [], current(acc?.limits ?? [], at))
     if (!limits.length) return next(e)
+    const f = c.animation === 'off' ? 0 : await read($, frame)
 
     const { Box, Text } = $.ui.resolve(e)
     const hint = e.props.hint
@@ -436,23 +654,27 @@ export const register: Register = on => {
     // The footer draws the mode label left of this row ("⏵⏵ auto mode on (shift+tab to cycle) · "),
     // which the hook is not told; reserve its longest form, less what the hint already holds.
     const reserve = /shift\+tab/.test(hint) ? 22 : 42
-    const fit = fitLimits((e.viewport?.columns ?? 120) - reserve, hint, items)
+    const fit = fitLimits((e.viewport?.columns ?? 120) - reserve, hint, items, c)
     if (!fit.count) return next(e)
 
     return (
       <Box flexDirection="row" flexWrap="nowrap">
         {fit.hint && hint ? <Text dimColor wrap="truncate">{`${hint}  ·  `}</Text> : null}
         {items.slice(0, fit.count).map((l, i) => {
-          const filled = Math.max(0, Math.min(fit.bar, Math.round((l.percent / 100) * fit.bar)))
-          const color = levelColor(l.percent)
+          const color = levelColor(l.percent, c)
           const reset = fit.reset === 'none' ? '' : fit.reset === 'short' ? shortReset(l.reset) : l.reset
+          const text = fit.overlay ? overlayText(l, c) : undefined
+          const bar = runs(limitCells(l, text ? text.length : fit.bar, c, f, text))
           return (
             <Box key={`${l.label}-${i}`} flexDirection="row" flexShrink={0}>
               {i ? <Text dimColor>{fit.sep}</Text> : null}
-              <Text bold>{`${l.label} `}</Text>
-              {fit.bar ? <Text color={color}>{FULL.repeat(filled)}</Text> : null}
-              {fit.bar ? <Text color={EMPTY}>{LIGHT.repeat(fit.bar - filled)}</Text> : null}
-              <Text color={color} bold>{` ${Math.round(l.percent)}%`}</Text>
+              {text ? null : <Text bold>{fit.bar ? `${l.label} ` : l.label}</Text>}
+              {bar.map((r, j) => (
+                <Text key={`bar-${j}`} color={r.fg} backgroundColor={r.bg} bold={r.bold}>
+                  {r.ch}
+                </Text>
+              ))}
+              {text || !showPct(c) ? null : <Text color={color} bold>{pctText(l)}</Text>}
               {reset ? <Text dimColor>{`  ↻ ${reset}`}</Text> : null}
             </Box>
           )

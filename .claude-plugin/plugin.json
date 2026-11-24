@@ -1,10 +1,53 @@
 {
   "name": "usage-bars",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Just another usage bar plugin: bars for the 5h, weekly and per-model limits and the context window, sized to fit narrow terminals",
   "types": "./types/index.d.ts",
   "author": {
     "name": "PalmarHealer"
   },
-  "license": "GPL-3.0-only"
+  "license": "GPL-3.0-only",
+  "userConfig": {
+    "layout": {
+      "type": "string",
+      "title": "Layout",
+      "description": "auto: label and percent move onto the bar only when the row is too narrow; compact: always on the bar",
+      "options": ["auto", "compact"],
+      "default": "auto"
+    },
+    "style": {
+      "type": "string",
+      "title": "Bar style",
+      "description": "solid: filled cells (glyphs on a matching background); glyphs: block glyphs only, for terminals without background colours",
+      "options": ["solid", "glyphs"],
+      "default": "solid"
+    },
+    "animation": {
+      "type": "string",
+      "title": "Animation",
+      "description": "off, wave (a light sweep across the filled part) or pulse (the filled part brightens and dims)",
+      "options": ["off", "wave", "pulse"],
+      "default": "off"
+    },
+    "showContext": { "type": "boolean", "title": "Show the context row", "description": "The context bar above the prompt", "default": true },
+    "showLimits": { "type": "boolean", "title": "Show the limits row", "description": "The 5h, weekly and per-model limits under the prompt", "default": true },
+    "showBars": { "type": "boolean", "title": "Show bars", "description": "Off: text only (label and percent)", "default": true },
+    "showPercent": { "type": "boolean", "title": "Show percent", "description": "The percent as a number; always shown while bars are off", "default": true },
+    "showTokens": { "type": "boolean", "title": "Show context tokens", "description": "The used/total figures next to the context bar, e.g. 121k/1M", "default": true },
+    "showLegend": { "type": "boolean", "title": "Show context legend", "description": "The categories (System prompt, Messages, ...) next to or under the context bar", "default": true },
+    "showResets": { "type": "boolean", "title": "Show reset times", "description": "The time until each limit resets", "default": true },
+    "contextColors": {
+      "type": "string",
+      "title": "Context bar colours",
+      "description": "categories: the colours /context uses; level: one colour, the fill colour (blue, orange, red)",
+      "options": ["categories", "level"],
+      "default": "categories"
+    },
+    "okColor": { "type": "string", "title": "Fill colour", "description": "#rrggbb, below the warning level", "default": "#5f87d7" },
+    "warnColor": { "type": "string", "title": "Warning colour", "description": "#rrggbb, from the warning level", "default": "#ffaf00" },
+    "critColor": { "type": "string", "title": "Critical colour", "description": "#rrggbb, from the critical level", "default": "#ff5f5f" },
+    "emptyColor": { "type": "string", "title": "Empty colour", "description": "#rrggbb, the unfilled part of a bar", "default": "#4e4e4e" },
+    "warnAt": { "type": "number", "title": "Warning level", "description": "Percent from which a bar turns to the warning colour", "default": 70 },
+    "critAt": { "type": "number", "title": "Critical level", "description": "Percent from which a bar turns to the critical colour", "default": 90 }
+  }
 }

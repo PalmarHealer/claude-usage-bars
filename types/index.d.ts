@@ -17,6 +17,6 @@ export type Account = { limits: Limit[]; fetchedAt: number; raw: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'usage-bars': { snapshot: Snapshot | null; account: Account | null; now: number }
+    'usage-bars': { snapshot: Snapshot | null; account: Account | null; now: number; frame: number }
   }
 }

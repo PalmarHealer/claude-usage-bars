@@ -1,7 +1,14 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
+  DEFAULTS,
   cells,
+  contextCells,
+  glow,
+  lighten,
+  limitCells,
+  readConfig,
+  runs,
   compact,
   current,
   fitContext,
@@ -11,6 +18,8 @@ import {
   limitLabel,
   mergeLimits,
   nextBackoff,
+  overlayContext,
+  overlayText,
   parseAccount,
   rowWidth,
   until,
@@ -93,7 +102,7 @@ test('keeps the context row inside narrow bands', () => {
   for (const cols of [20, 40, 60, 80, 100, 140, 200]) {
     const fit = fitContext(cols, used, figures)
     const width =
-      fit.label.length + fit.bar + 5 + (fit.showFigures ? figures.length : 0) +
+      (fit.overlay ? fit.bar : fit.label.length + fit.bar + 5) + (fit.showFigures ? figures.length : 0) +
       (fit.legend.length ? 3 + fit.legend.reduce((s, i) => s + legendText(used[i]!).length, 0) : 0)
     expect(width <= cols || fit.bar <= 10).toBe(true)
     expect(fit.bar >= 3).toBe(true)
@@ -103,6 +112,17 @@ test('keeps the context row inside narrow bands', () => {
   expect(narrow.legend).toContain(3)
   expect(narrow.second.length).toBeGreaterThan(0)
   expect(narrow.second.reduce((s, i) => s + legendText(used[i]!).length, 0)).toBeLessThanOrEqual(60)
+})
+
+test('draws the context label and percent on the bar when the bar would not fit', () => {
+  const used = [{ name: 'Messages', tokens: 120_000, color: 'd', kind: 'used' as const }]
+  const figures = '  120k/1M'
+  expect(fitContext(80, used, figures).overlay).toBeFalsy()
+  const narrow = fitContext(30, used, figures)
+  expect(narrow.overlay && narrow.showFigures).toBe(true)
+  expect(narrow.bar + figures.length).toBeLessThanOrEqual(30)
+  expect(overlayContext('Context', 12, 18)).toBe(' Context  12%     ')
+  expect(fitContext(12, used, figures).label).toBe('Ctx')
 })
 
 test('gives up limit detail before it overflows the footer', () => {
@@ -123,6 +143,19 @@ test('gives up limit detail before it overflows the footer', () => {
   expect(tight.hint).toBe(false)
 })
 
+test('moves the bar behind the text before it drops a limit', () => {
+  const items = [
+    { label: '5h', percent: 12, reset: '2h 14m' },
+    { label: 'Weekly', percent: 43, reset: '5d 13h' },
+    { label: 'Fable', percent: 41, reset: '5d 13h' },
+  ]
+  expect(overlayText(items[0]!)).toBe(' 5h 12% ')
+  expect(fitLimits(160, 'esc to interrupt', items).overlay).toBeFalsy()
+  const narrow = fitLimits(40, '', items)
+  expect(narrow.overlay && narrow.count === 3).toBe(true)
+  expect(rowWidth('', items, narrow)).toBeLessThanOrEqual(40)
+})
+
 test('backs off after a refusal and drops windows that have reset', () => {
   expect(nextBackoff(undefined, undefined)).toBe(5 * 60_000)
   expect(nextBackoff(5 * 60_000, undefined)).toBe(10 * 60_000)
@@ -134,4 +167,52 @@ test('backs off after a refusal and drops windows that have reset', () => {
     { kind: 'seven_day', percent: 43, resetsAt: '2026-11-19T14:00:00Z' },
   ]
   expect(current(limits, at).map(l => l.kind)).toEqual(['seven_day'])
+})
+
+test('reads the settings over the defaults and ignores bad values', () => {
+  expect(readConfig({})).toEqual(DEFAULTS)
+  const c = readConfig({ layout: 'compact', okColor: '00ff00', warnColor: 'red', warnAt: 150, showBars: 'no' })
+  expect(c.layout).toBe('compact')
+  expect(c.okColor).toBe('#00ff00')
+  expect(c.warnColor).toBe(DEFAULTS.warnColor)
+  expect(c.warnAt).toBe(100)
+  expect(c.showBars).toBe(true)
+  expect(levelColor(80, { ...DEFAULTS, okColor: '#000000', warnAt: 90 })).toBe('#000000')
+})
+
+test('compact always draws the text on the bar; no bars leaves text only', () => {
+  const items = [{ label: '5h', percent: 12, reset: '2h 14m' }]
+  const compactC = { ...DEFAULTS, layout: 'compact' as const }
+  expect(fitLimits(200, '', items, compactC).overlay).toBe(true)
+  expect(fitContext(200, [], '  1k/1M', compactC).overlay).toBe(true)
+  const bare = { ...DEFAULTS, showBars: false, showPercent: false }
+  const fit = fitLimits(200, '', items, bare)
+  expect(fit.bar === 0 && !fit.overlay).toBe(true)
+  expect(rowWidth('', items, fit, bare)).toBe('5h 12%  ↻ 2h 14m'.length)
+  expect(fitLimits(200, '', items, { ...DEFAULTS, showResets: false }).reset).toBe('none')
+})
+
+test('paints solid bars on a matching background, glyphs alone when asked', () => {
+  const l = { label: '5h', percent: 50, reset: '' }
+  const solid = runs(limitCells(l, 4, DEFAULTS))
+  expect(solid.map(r => `${r.ch}:${r.fg}:${r.bg}`)).toEqual(['██:#5f87d7:#5f87d7', '░░:#4e4e4e:#4e4e4e'])
+  const glyphs = runs(limitCells(l, 4, { ...DEFAULTS, style: 'glyphs' }))
+  expect(glyphs.every(r => r.bg === undefined)).toBe(true)
+  const segs = [
+    { name: 'Messages', tokens: 50, color: '#abcdef', kind: 'used' as const },
+    { name: 'Free', tokens: 50, color: 'x', kind: 'free' as const },
+  ]
+  const fit = { label: 'Context', showFigures: false, legend: [], second: [], bar: 10 }
+  const level = contextCells(segs, fit, 95, { ...DEFAULTS, contextColors: 'level' })
+  expect(level[0]!.fg).toBe(DEFAULTS.critColor)
+  expect(contextCells(segs, fit, 95, DEFAULTS)[0]!.fg).toBe('#abcdef')
+})
+
+test('animates the filled part only while animation is on', () => {
+  expect(glow('off', 7, 3)).toBe(0)
+  const wave = Array.from({ length: 20 }, (_, i) => glow('wave', 0, i))
+  expect(Math.max(...wave)).toBeGreaterThan(0)
+  expect(new Set(wave).size).toBeGreaterThan(1)
+  expect(lighten('#000000', 0.5)).toBe('#808080')
+  expect(lighten('permission', 0.5)).toBe('permission')
 })
